@@ -8,6 +8,13 @@ try {
 } catch (error) {
   throw new Error("cheerio 模块未找到,请先安装:npm install cheerio");
 }
+let axios;
+try {
+  axios = require("axios");
+} catch (error) {
+  throw new Error("axios 模块未找到,请先安装:npm install axios");
+}
+const https = require("https");
 const fs = require("fs");
 
 // ==================== 配置区域 ====================
@@ -32,28 +39,81 @@ if (WEB_SITES.length === 0) {
 
 OmniBox.log("info", `配置了 ${WEB_SITES.length} 个域名: ${WEB_SITES.join(', ')}`);
 
+const INSECURE_HTTPS_AGENT = new https.Agent({
+  rejectUnauthorized: false,
+});
+
+async function httpRequest(url, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+
+  const response = await axios({
+    url,
+    method,
+    headers: options.headers || {},
+    data: options.body,
+    timeout: options.timeout,
+    httpsAgent: INSECURE_HTTPS_AGENT,
+    validateStatus: () => true,
+    responseType: "text",
+    transformResponse: [(data) => data],
+  });
+
+  let body = response.data;
+  if (typeof body !== "string") {
+    body = body === undefined || body === null ? "" : JSON.stringify(body);
+  }
+
+  return {
+    statusCode: response.status,
+    body,
+    headers: response.headers || {},
+  };
+}
+
+function isBlockedHtml(body = "") {
+  if (!body || typeof body !== "string") {
+    return false;
+  }
+  const lower = body.toLowerCase();
+  return (
+    lower.includes("just a moment") ||
+    lower.includes("cf-browser-verification") ||
+    lower.includes("cloudflare") ||
+    lower.includes("captcha") ||
+    lower.includes("访问验证")
+  );
+}
+
 /**
  * 带容灾的请求函数
  */
 async function requestWithFailover(path, options = {}) {
   let lastError = null;
+  const perDomainTimeout = Math.max(1000, Math.floor(30000 / WEB_SITES.length));
 
   for (let i = 0; i < WEB_SITES.length; i++) {
     const baseUrl = removeTrailingSlash(WEB_SITES[i]);
     const fullUrl = path.startsWith('http') ? path : baseUrl + path;
 
     try {
-      OmniBox.log("info", `尝试请求域名 ${i + 1}/${WEB_SITES.length}: ${fullUrl}`);
+      OmniBox.log("info", `尝试请求域名 ${i + 1}/${WEB_SITES.length}: ${fullUrl}, timeout=${options.timeout ?? perDomainTimeout}ms`);
 
-      const response = await OmniBox.request(fullUrl, {
-        method: "GET",
+      const response = await httpRequest(fullUrl, {
+        ...options,
+        method: options.method || "GET",
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          ...(options.headers || {}),
         },
-        ...options,
+        timeout: options.timeout ?? perDomainTimeout,
       });
 
       if (response.statusCode === 200 && response.body) {
+        if (isBlockedHtml(response.body)) {
+          OmniBox.log("warn", `域名 ${baseUrl} 命中风控页,切换下一个域名`);
+          lastError = new Error("命中风控页面");
+          continue;
+        }
         OmniBox.log("info", `域名 ${baseUrl} 请求成功`);
         return { response, baseUrl };
       } else {
@@ -85,7 +145,7 @@ async function getDynamicFilters() {
     if (config.startsWith('http')) {
       try {
         OmniBox.log("info", `正在从远程链接读取过滤器: ${config}`);
-        const response = await OmniBox.request(config, {
+        const response = await httpRequest(config, {
           method: "GET",
           headers: {
             "Accept": "application/json; charset=utf-8"
