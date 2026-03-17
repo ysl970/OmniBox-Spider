@@ -1,8 +1,8 @@
 // @name 4KVM
 // @author 
-// @description 刮削：支持，弹幕：支持，嗅探：支持
+// @description 刮削：支持，弹幕：支持，嗅探：支持，直连解析：支持
 // @dependencies: axios, cheerio
-// @version 1.1.0
+// @version 1.0.4
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/4KVM.js
 
 /**
@@ -11,6 +11,7 @@
 * 刮削：支持
 * 弹幕：支持
 * 嗅探：支持
+* 解析：增加 artplayer 页面 JS 逆向解析
 * ============================================================================
 */
 const axios = require("axios");
@@ -210,7 +211,7 @@ const getEpisodeCount = ($seasonData, pageHtml) => {
             const episodeNumbers = [];
             episodeLinks.each((_, el) => {
                 const text = $seasonData(el).text().trim();
-                if (text) {
+                if (text && /^\d+$/.test(text)) {
                     const num = parseInt(text);
                     if (num >= 1 && num <= 500) {
                         episodeNumbers.push(num);
@@ -218,11 +219,8 @@ const getEpisodeCount = ($seasonData, pageHtml) => {
                 }
             });
             if (episodeNumbers.length > 0) {
-                const result = Math.max(...episodeNumbers);
-                logInfo("集数检测命中方法1: .jujiepisodios", { count: result, samples: episodeNumbers.slice(0, 10) });
-                return result;
+                return Math.max(...episodeNumbers);
             }
-            logInfo("集数检测方法1未命中: .jujiepisodios无有效数字");
         }
 
         // 方法2: JavaScript数据提取
@@ -234,13 +232,10 @@ const getEpisodeCount = ($seasonData, pageHtml) => {
                     const numbers = episodeNames.map(m => parseInt(m.match(/\d+/)[0]));
                     const sorted = [...new Set(numbers)].sort((a, b) => a - b);
                     if (sorted[0] === 1 && sorted[sorted.length - 1] - sorted[0] === sorted.length - 1) {
-                        const result = Math.max(...sorted);
-                        logInfo("集数检测命中方法2: JS数据", { count: result, samples: sorted.slice(0, 10) });
-                        return result;
+                        return Math.max(...sorted);
                     }
                 }
             }
-            logInfo("集数检测方法2未命中: JS数据未形成连续集数");
         }
 
         // 方法3: 文本模式匹配
@@ -249,17 +244,12 @@ const getEpisodeCount = ($seasonData, pageHtml) => {
         for (const pattern of patterns) {
             const matches = pageText.match(pattern);
             if (matches && matches[1]) {
-                const result = parseInt(matches[1]);
-                logInfo("集数检测命中方法3: 文本模式", { pattern: String(pattern), count: result });
-                return result;
+                return parseInt(matches[1]);
             }
         }
-        logInfo("集数检测方法3未命中: 文本模式无匹配");
 
         // 默认值
-        const fallbackCount = $seasonData('iframe, video, .player').length ? 24 : 1;
-        logInfo("集数检测走默认值", { count: fallbackCount, hasPlayer: $seasonData('iframe, video, .player').length > 0 });
-        return fallbackCount;
+        return $seasonData('iframe, video, .player').length ? 24 : 1;
     } catch (error) {
         logError("检测集数失败", error);
         return 1;
@@ -270,21 +260,10 @@ const getEpisodeCount = ($seasonData, pageHtml) => {
 * 获取季度集数信息
 */
 const getSeasonEpisodes = async ($, detailUrl) => {
-    const seasonSources = [];
+    const playLinks = [];
 
     try {
         const seasonLinks = $('.seasons-list a, .season-item a, .se-c a, .se-a a, .seasons a');
-
-        let episodeCount = 500;
-        const customFields = $(".custom_fields");
-        if (customFields.length) {
-            const spanText = customFields.last().find("span").last().text().trim();
-            const parsed = parseInt(spanText, 10);
-            if (!Number.isNaN(parsed) && parsed > 0) {
-                episodeCount = parsed;
-                OmniBox.log("info", `集数检测命中方法0: .custom_fields span ${episodeCount}`)
-            }
-        }
 
         for (let i = 0; i < seasonLinks.length; i++) {
             const $season = seasonLinks.eq(i);
@@ -294,40 +273,35 @@ const getSeasonEpisodes = async ($, detailUrl) => {
             if (!seasonUrl) continue;
 
             try {
-                logInfo(`获取季度信息: ${seasonTitle}，seasonUrl：${seasonUrl}`);
+                logInfo(`获取季度信息: ${seasonTitle}`);
                 const seasonResp = await axiosInstance.get(seasonUrl, { headers: config.headers });
                 const $seasonData = cheerio.load(seasonResp.data);
-                if (seasonLinks.length > 1) {
-                    episodeCount = getEpisodeCount($seasonData, seasonResp.data);
-                }
-                const limitedCount = Math.min(Math.max(episodeCount, 1), episodeCount);
+
+                const episodeCount = getEpisodeCount($seasonData, seasonResp.data);
+                const limitedCount = Math.min(Math.max(episodeCount, 1), 500);
 
                 logInfo(`${seasonTitle} 集数: ${limitedCount}`);
 
-                const episodes = [];
                 if (limitedCount === 1) {
-                    episodes.push({ name: '第1集', url: seasonUrl });
+                    playLinks.push(`${seasonTitle}$${seasonUrl}`);
                 } else {
+                    const cleanTitle = seasonTitle.split('已完結')[0].split('更新')[0].trim();
                     for (let epNum = 1; epNum <= limitedCount; epNum++) {
-                        const episodeTitle = `第${epNum}集`;
+                        const episodeTitle = `${cleanTitle} 第${epNum}集`;
                         const episodeUrl = `${seasonUrl}?ep=${epNum}`;
-                        episodes.push({ name: episodeTitle, url: episodeUrl });
+                        playLinks.push(`${episodeTitle}$${episodeUrl}`);
                     }
-                }
-
-                if (episodes.length > 0) {
-                    seasonSources.push({ name: seasonTitle, episodes });
                 }
             } catch (error) {
                 logError("获取季度失败", error);
-                seasonSources.push({ name: seasonTitle, episodes: [{ name: '第1集', url: seasonUrl }] });
+                playLinks.push(`${seasonTitle}$${seasonUrl}`);
             }
         }
     } catch (error) {
         logError("获取季度列表失败", error);
     }
 
-    return seasonSources;
+    return playLinks;
 };
 
 /**
@@ -386,31 +360,6 @@ const parsePlaySources = (playLinks, vodName, videoId = "") => {
         name: '4KVM',
         episodes: episodes
     }];
-};
-
-const buildSeasonPlaySources = (seasonSources, vodName, videoId = "") => {
-    if (!seasonSources || seasonSources.length === 0) {
-        return [];
-    }
-    return seasonSources.map((season, seasonIndex) => {
-        const episodes = (season.episodes || []).map((ep, epIndex) => {
-            const episodeName = ep.name || '正片';
-            const actualUrl = ep.url || '';
-            const fid = `${videoId}#${seasonIndex}#${epIndex}`;
-            const combinedId = `${actualUrl}|||${encodeMeta({ sid: String(videoId || ""), fid, v: vodName || "", e: episodeName })}`;
-            return {
-                name: episodeName,
-                playId: combinedId,
-                _fid: fid,
-                _rawName: episodeName,
-            };
-        }).filter(e => e.playId);
-
-        return {
-            name: season.name || `线路${seasonIndex + 1}`,
-            episodes: episodes
-        };
-    }).filter(source => (source.episodes || []).length > 0);
 };
 /**
 * 过滤电视剧内容
@@ -490,75 +439,75 @@ const filterSearchResults = (results, searchKey) => {
  * 预处理标题，去掉常见干扰项
  */
 function preprocessTitle(title) {
-    if (!title) return "";
-    return title
-        .replace(/4[kK]|[xX]26[45]|720[pP]|1080[pP]|2160[pP]|1280x720|1920x1080/g, " ")
-        .replace(/[hH]\.?26[45]/g, " ")
-        .replace(/BluRay|WEB-DL|HDR|REMUX/gi, " ")
-        .replace(/\.mp4|\.mkv|\.avi|\.flv/gi, " ");
+  if (!title) return "";
+  return title
+    .replace(/4[kK]|[xX]26[45]|720[pP]|1080[pP]|2160[pP]|1280x720|1920x1080/g, " ")
+    .replace(/[hH]\.?26[45]/g, " ")
+    .replace(/BluRay|WEB-DL|HDR|REMUX/gi, " ")
+    .replace(/\.mp4|\.mkv|\.avi|\.flv/gi, " ");
 }
 
 /**
  * 将中文数字转换为阿拉伯数字 (简单实现)
  */
 function chineseToArabic(cn) {
-    const map = { '零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 };
-    if (!isNaN(cn)) return parseInt(cn);
-    if (cn.length === 1) return map[cn] || cn;
-    if (cn.length === 2) {
-        if (cn[0] === '十') return 10 + map[cn[1]];
-        if (cn[1] === '十') return map[cn[0]] * 10;
-    }
-    if (cn.length === 3) return map[cn[0]] * 10 + map[cn[2]];
-    return cn;
+  const map = { '零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 };
+  if (!isNaN(cn)) return parseInt(cn);
+  if (cn.length === 1) return map[cn] || cn;
+  if (cn.length === 2) {
+    if (cn[0] === '十') return 10 + map[cn[1]];
+    if (cn[1] === '十') return map[cn[0]] * 10;
+  }
+  if (cn.length === 3) return map[cn[0]] * 10 + map[cn[2]];
+  return cn;
 }
 
 /**
  * 核心：从标题中提取集数数字
  */
 function extractEpisode(title) {
-    if (!title) return "";
+  if (!title) return "";
 
-    const processedTitle = preprocessTitle(title).trim();
+  const processedTitle = preprocessTitle(title).trim();
 
-    // 1. S01E03 格式
-    const seMatch = processedTitle.match(/[Ss](?:\d{1,2})?[-._\s]*[Ee](\d{1,3})/i);
-    if (seMatch) return seMatch[1];
+  // 1. S01E03 格式
+  const seMatch = processedTitle.match(/[Ss](?:\d{1,2})?[-._\s]*[Ee](\d{1,3})/i);
+  if (seMatch) return seMatch[1];
 
-    // 2. 中文格式：第XX集/话
-    const cnMatch = processedTitle.match(/第\s*([零一二三四五六七八九十0-9]+)\s*[集话章节回期]/);
-    if (cnMatch) return String(chineseToArabic(cnMatch[1]));
+  // 2. 中文格式：第XX集/话
+  const cnMatch = processedTitle.match(/第\s*([零一二三四五六七八九十0-9]+)\s*[集话章节回期]/);
+  if (cnMatch) return String(chineseToArabic(cnMatch[1]));
 
-    // 3. EP/E 格式
-    const epMatch = processedTitle.match(/\b(?:EP|E)[-._\s]*(\d{1,3})\b/i);
-    if (epMatch) return epMatch[1];
+  // 3. EP/E 格式
+  const epMatch = processedTitle.match(/\b(?:EP|E)[-._\s]*(\d{1,3})\b/i);
+  if (epMatch) return epMatch[1];
 
-    // 4. 括号格式 [03]
-    const bracketMatch = processedTitle.match(/[\[\(【（](\d{1,3})[\]\)】）]/);
-    if (bracketMatch) {
-        const num = bracketMatch[1];
-        // 排除常见分辨率
-        if (!["720", "1080", "480"].includes(num)) return num;
+  // 4. 括号格式 [03]
+  const bracketMatch = processedTitle.match(/[\[\(【（](\d{1,3})[\]\)】）]/);
+  if (bracketMatch) {
+    const num = bracketMatch[1];
+    // 排除常见分辨率
+    if (!["720", "1080", "480"].includes(num)) return num;
+  }
+
+  // 5. 独立的数字 (排除常见的视频参数)
+  const standaloneMatches = processedTitle.match(/(?:^|[\s\-\._\[\]])(\d{1,3})(?![0-9pP])/g);
+  if (standaloneMatches) {
+    const candidates = standaloneMatches
+      .map(m => m.match(/\d+/)[0])
+      .filter(num => {
+        const n = parseInt(num);
+        return n > 0 && n < 300 && !["720", "480", "264", "265"].includes(num);
+      });
+    
+    if (candidates.length > 0) {
+      // 优先取 1-99 之间的
+      const normalEp = candidates.find(n => parseInt(n) < 100);
+      return normalEp || candidates[0];
     }
+  }
 
-    // 5. 独立的数字 (排除常见的视频参数)
-    const standaloneMatches = processedTitle.match(/(?:^|[\s\-\._\[\]])(\d{1,3})(?![0-9pP])/g);
-    if (standaloneMatches) {
-        const candidates = standaloneMatches
-            .map(m => m.match(/\d+/)[0])
-            .filter(num => {
-                const n = parseInt(num);
-                return n > 0 && n < 300 && !["720", "480", "264", "265"].includes(num);
-            });
-
-        if (candidates.length > 0) {
-            // 优先取 1-99 之间的
-            const normalEp = candidates.find(n => parseInt(n) < 100);
-            return normalEp || candidates[0];
-        }
-    }
-
-    return "";
+  return "";
 }
 
 /**
@@ -723,7 +672,7 @@ async function home(params) {
                     const subLink = normalizeUrl($sub.find('a').attr('href'));
                     const subName = $sub.find('a').text().trim();
 
-                    if (subLink && subName && !subLink.includes('/seasons/')) {
+                    if (subLink && subName) {
                         classes.push({
                             type_id: subLink,
                             type_name: `${name}-${subName}`
@@ -831,16 +780,12 @@ async function detail(params) {
 
         // 获取播放链接
         let playLinks = extractPlayOptions($, videoId);
-        let seasonSources = [];
 
         // 如果没有播放选项,尝试获取季度信息
         if (playLinks.length === 0) {
             const seasonLinks = $('.seasons-list a, .season-item a, .se-c a, .se-a a, .seasons a');
             if (seasonLinks.length > 0) {
-                seasonSources = await getSeasonEpisodes($, videoId);
-                if (seasonSources.length === 0) {
-                    playLinks = [`播放$${videoId}`];
-                }
+                playLinks = await getSeasonEpisodes($, videoId);
             } else {
                 playLinks = [`播放$${videoId}`];
             }
@@ -848,9 +793,7 @@ async function detail(params) {
 
         // 转换为 vod_play_sources 格式
         const videoIdForScrape = String(videoId || "");
-        const playSources = seasonSources.length > 0
-            ? buildSeasonPlaySources(seasonSources, vod.vod_name, videoIdForScrape)
-            : parsePlaySources(playLinks, vod.vod_name, videoIdForScrape);
+        const playSources = parsePlaySources(playLinks, vod.vod_name, videoIdForScrape);
 
         let scrapeData = null;
         let videoMappings = [];
@@ -948,8 +891,7 @@ async function detail(params) {
             }
         }
 
-        const totalEpisodes = playSources.reduce((sum, source) => sum + (source.episodes || []).length, 0);
-        logInfo(`播放线路数: ${playSources.length}, 总集数: ${totalEpisodes}`);
+        logInfo(`播放链接数: ${playLinks.length}`);
 
         return {
             list: [vod]
@@ -1005,7 +947,7 @@ async function play(params) {
     let episodeName = "";
     let playMeta = {};
 
-    // 关键修改：解析透传参数
+    // 解析透传参数
     if (playId && playId.includes("|||")) {
         const [mainPlayId, metaB64] = playId.split("|||");
         playId = mainPlayId;
@@ -1016,12 +958,13 @@ async function play(params) {
     } else if (playId && playId.includes('|')) {
         // 兼容旧格式
         const parts = playId.split('|');
-        playId = parts[0];      // 真正的 URL
+        playId = parts[0];
         vodName = parts[1] || "";
         episodeName = parts[2] || "";
         logInfo(`解析透传信息 - 视频: ${vodName}, 集数: ${episodeName}`);
     }
 
+    // 弹幕文件名准备
     let scrapedDanmuFileName = "";
     try {
         const videoIdFromParam = params.vodId ? String(params.vodId) : "";
@@ -1051,15 +994,19 @@ async function play(params) {
     }
 
     try {
-        // 解析参数
-        let dataPost = null;
-        let dataNume = null;
-        let dataType = null;
-        let baseUrl = playId;
+        // 步骤 1: 确定目标 URL (可能是 API 解析后的, 可能是页面 URL)
+        let targetUrl = playId;
+        let playResponse = {
+            urls: [{ name: "4KVM", url: playId }],
+            parse: 1,
+            header: PLAY_HEADERS
+        };
 
+        // 尝试使用 wp-json API 获取 embed_url
+        // 许多页面通过 API 返回 artplayer 地址
         if (playId.includes('?')) {
+            let dataPost = null, dataNume = null, dataType = null;
             const [url, queryParams] = playId.split('?', 2);
-            baseUrl = url;
             const paramPairs = queryParams.split('&');
             for (const pair of paramPairs) {
                 const [key, value] = pair.split('=');
@@ -1067,87 +1014,110 @@ async function play(params) {
                 if (key === 'nume') dataNume = value;
                 if (key === 'type') dataType = value;
             }
-        }
 
-        let playResponse = {
-            urls: [{ name: "4KVM", url: playId }],
-            parse: 1,
-            header: PLAY_HEADERS
-        };
+            if (dataPost && dataNume) {
+                try {
+                    const apiUrl = `${config.host}/wp-json/dooplayer/v1/post/${dataPost}`;
+                    const apiResponse = await axiosInstance.get(apiUrl, {
+                        headers: config.headers,
+                        params: { type: dataType || 'movie', source: dataNume }
+                    });
 
-        // API调用
-        if (dataPost && dataNume) {
-            try {
-                const apiUrl = `${config.host}/wp-json/dooplayer/v1/post/${dataPost}`;
-                const apiResponse = await axiosInstance.get(apiUrl, {
-                    headers: config.headers,
-                    params: {
-                        type: dataType || 'movie',
-                        source: dataNume
+                    if (apiResponse.status === 200 && apiResponse.data.embed_url) {
+                        targetUrl = apiResponse.data.embed_url;
+                        logInfo(`API解析获得地址: ${targetUrl}`);
                     }
-                });
-
-                if (apiResponse.status === 200 && apiResponse.data.embed_url) {
-                    const embedUrl = apiResponse.data.embed_url;
-                    const parseFlag = ['.m3u8', '.mp4', '.flv', '.avi'].some(ext =>
-                        embedUrl.toLowerCase().includes(ext)
-                    ) ? 0 : 1;
-
-                    logInfo(`API解析成功: ${embedUrl}`);
-                    playResponse.urls = [{ name: "4KVM", url: embedUrl }];
-                    playResponse.parse = parseFlag;
+                } catch (e) {
+                    logInfo("API调用失败, 回退到页面解析");
                 }
-            } catch (error) {
-                logError("API调用失败", error);
             }
         }
 
-        // 如果API调用失败，页面解析回退
-        if (playResponse.urls[0].url === playId) {
-            const response = await axiosInstance.get(baseUrl, { headers: config.headers });
-            const $ = cheerio.load(response.data);
+        // 如果 targetUrl 还是页面地址 (非 artplayer, 非直链), 尝试从页面提取 artplayer 链接
+        if (!targetUrl.includes('artplayer') && !targetUrl.match(/\.(mp4|m3u8|flv)/)) {
+            try {
+                const pageHtml = (await axiosInstance.get(targetUrl, { headers: config.headers })).data;
+                // 匹配 ifsrc:'https://...'
+                const ifsrcMatch = pageHtml.match(/ifsrc\s*:\s*['"](.*?)['"]/);
+                if (ifsrcMatch) {
+                    let artUrl = ifsrcMatch[1];
+                    // 尝试从 URL 中推断集数索引 (URL通常是 ?ep=1, artplayer 需要 source=0&ep=0)
+                    const urlObj = new URL(targetUrl);
+                    const epParam = urlObj.searchParams.get('ep');
+                    const epIndex = epParam ? Math.max(0, parseInt(epParam) - 1) : 0;
+                    
+                    if (!artUrl.includes('source=')) {
+                        artUrl += `&source=0&ep=${epIndex}`;
+                    }
+                    targetUrl = artUrl;
+                    logInfo(`页面解析获得 ArtPlayer 地址: ${targetUrl}`);
+                }
+            } catch (e) {
+                logInfo("页面解析失败");
+            }
+        }
 
-            // 查找iframe
-            const iframe = $('iframe.metaframe, .dooplay_player iframe, .player iframe').first().attr('src');
-            if (iframe) {
-                const iframeUrl = normalizeUrl(iframe);
-                const parseFlag = ['.m3u8', '.mp4', '.flv'].some(ext =>
-                    iframeUrl.toLowerCase().includes(ext)
-                ) ? 0 : 1;
+        // 步骤 2: 如果是 ArtPlayer 页面，执行 JS 逆向解析
+        if (targetUrl.includes('artplayer')) {
+            logInfo("开始解析 ArtPlayer", targetUrl);
+            const artHeaders = { ...config.headers, Referer: playId }; // Referer 很重要
+            const artHtml = (await axiosInstance.get(targetUrl, { headers: artHeaders })).data;
 
-                logInfo(`Iframe解析: ${iframeUrl}`);
-                playResponse.urls = [{ name: "4KVM", url: iframeUrl }];
-                playResponse.parse = parseFlag;
+            // 提取 JS 中的 body 对象
+            // 目标代码: const body = { ... };
+            const bodyMatch = artHtml.match(/const\s+body\s*=\s*(\{[\s\S]*?\});/);
+            
+            if (bodyMatch) {
+                try {
+                    // 使用 Function 构造器安全解析 JS 对象字符串 (因为 key 没有引号, JSON.parse 不行)
+                    const bodyObj = new Function('return ' + bodyMatch[1])();
+                    const sourceUrl = bodyObj.source;
+                    
+                    logInfo("获取到加密参数, 请求真实地址", sourceUrl);
+
+                    // 构造 POST 请求
+                    // 注意: 虽然 Content-Type 是 form-urlencoded, 但实际发送的是 JSON 字符串
+                    const videoJson = (await axiosInstance.post(sourceUrl, JSON.stringify(bodyObj), {
+                        headers: {
+                            "User-Agent": config.headers["User-Agent"],
+                            "Content-Type": "application/x-www-form-urlencoded",
+                            "Origin": config.host,
+                            "Referer": targetUrl
+                        }
+                    })).data;
+
+                    if (videoJson && videoJson.url) {
+                        logInfo("ArtPlayer 解析成功", videoJson.url);
+                        playResponse.urls = [{ name: "4KVM", url: videoJson.url }];
+                        playResponse.parse = 0; // 直连
+                    }
+                } catch (e) {
+                    logError("ArtPlayer 解析内部错误", e);
+                }
             } else {
-                // 查找video标签
-                const videoSrc = normalizeUrl($('video source, video').first().attr('src'));
-                if (videoSrc) {
-                    logInfo(`Video标签解析: ${videoSrc}`);
-                    playResponse.urls = [{ name: "4KVM", url: videoSrc }];
-                    playResponse.parse = 0;
-                }
+                logInfo("ArtPlayer 页面未找到参数 body");
             }
+        } else if (targetUrl !== playId) {
+            // 如果通过 API 拿到了直链 (非 artplayer)
+            playResponse.urls = [{ name: "4KVM", url: targetUrl }];
+            const parseFlag = ['.m3u8', '.mp4', '.flv'].some(ext => targetUrl.toLowerCase().includes(ext)) ? 0 : 1;
+            playResponse.parse = parseFlag;
         }
 
-        if (playResponse.urls[0]?.url && !playResponse.urls[0]?.url.match(/\.(m3u8|mp4|flv|avi|mkv|ts)/i)) {
-            const sniffResult = await sniff4kvmPlay(playResponse.urls[0].url);
-            if (sniffResult) {
-                playResponse = sniffResult;
-            }
+        // 步骤 3: 如果上述解析都失败，尝试嗅探
+        if (playResponse.parse === 1 && playResponse.urls[0].url) {
+             const sniffResult = await sniff4kvmPlay(playResponse.urls[0].url);
+             if (sniffResult) {
+                 playResponse = sniffResult;
+             }
         }
-
-        OmniBox.log("info", `使用默认播放：${playId}`);
-
-        OmniBox.log("info", `DANMU_API: ${DANMU_API}, params.vodName：${params.vodName}`);
 
         // 弹幕匹配
         if (DANMU_API && (vodName || params.vodName)) {
             const finalVodName = vodName || params.vodName;
             const finalEpisodeName = episodeName || params.episodeName || '';
-
             const fileName = scrapedDanmuFileName || buildFileNameForDanmu(finalVodName, finalEpisodeName);
-            logInfo(`尝试匹配弹幕文件名: ${fileName}`);
-
+            
             if (fileName) {
                 const danmakuList = await matchDanmu(fileName);
                 if (danmakuList && danmakuList.length > 0) {
@@ -1159,10 +1129,10 @@ async function play(params) {
         return playResponse;
     } catch (error) {
         logError("播放解析失败", error);
+        // 最终兜底
         const fallbackSniff = await sniff4kvmPlay(playId);
-        if (fallbackSniff) {
-            return fallbackSniff;
-        }
+        if (fallbackSniff) return fallbackSniff;
+        
         return {
             urls: [{ name: "4KVM", url: playId }],
             parse: 1,
