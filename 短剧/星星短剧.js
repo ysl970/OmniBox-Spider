@@ -1,6 +1,5 @@
 // @name 星星短剧 ᵈᶻ[短]
 // @version 1.0.2
-// @downloadURL https://example.com/spider.js
 // @indexs 1
 // @push 0
 // @dependencies axios
